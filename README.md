@@ -4,7 +4,7 @@
 
 <p align="left"><img src="assets/InstanceFormer_arch.png" width="1000"/></p> 
 
-This is an official Pytorch implementation of our AAAI 2023 paper [InstanceFormer: An Online Video Instance Segmentation Framework](https://arxiv.org/abs/2208.10547v1). In this repository, we provide PyTorch code for training and testing our proposed InstanceFormer model. InstanceFormer is an efficient video instance segmentation and tracking model that achieves state-of-the-art results on several benchmarks such as [YTVIS-19/21/22](https://youtube-vos.org/) and [OVIS](https://songbai.site/ovis/).
+This is an official Pytorch implementation of our AAAI 2023 paper [InstanceFormer: An Online Video Instance Segmentation Framework](https://arxiv.org/abs/2208.10547v1). In this repository, we provide PyTorch code for training and testing our proposed InstanceFormer model. InstanceFormer is an efficient video instance segmentation and tracking model that achieves state-of-the-art results on several benchmarks, such as [YTVIS-19/21/22](https://youtube-vos.org/) and [OVIS](https://songbai.site/ovis/).
 
 
 
@@ -29,14 +29,13 @@ python test.py
 
 # Data Preparation
 
-Download extract [OVIS](https://songbai.site/ovis/index.html), 
+Download and extract [OVIS](https://songbai.site/ovis/index.html), 
 [YTVIS-19](https://youtube-vos.org/challenge/2019/), 
 [YTVIS-21](https://youtube-vos.org/challenge/2021/),
 [YTVIS-22](https://youtube-vos.org/challenge/2022/),
-and download [COCO](https://cocodataset.org/) 2017 datasets. 
+and [COCO](https://cocodataset.org/) 2017 datasets. 
 Run coco_keep_for_ovis.py and coco_keep_for_ytvis21.py. 
-Download 'coco_keepfor_ytvis19.json' to the datasets folder from this 
-Link  [[google]](https://drive.google.com/file/d/1dhfxtnu0oiolNyOWjf4CscBgb_tNg-K8/view?usp=sharing).
+Download 'coco_keepfor_ytvis19.json' to the datasets folder from this [link](https://drive.google.com/file/d/1dhfxtnu0oiolNyOWjf4CscBgb_tNg-K8/view?usp=sharing).
 
 ## Directory Structure
 ```python
@@ -59,13 +58,13 @@ coco
 ```
 # Run 
 ## Pretraining
-First, pre-train the InstanceFormer with [COCO](https://cocodataset.org/) dataset with frame size 1.
+First, pre-train the InstanceFormer with the [COCO](https://cocodataset.org/) dataset with frame size 1.
 
 ```bash
 bash configs/r50_pretrain.sh
 ```
 ## Training
-All models of InstanceFormer are trained on four NVIDIA RTX A6000 GPU with a total batch size of 16.
+All models of InstanceFormer are trained on four NVIDIA RTX A6000 GPUs with a total batch size of 16.
 To train InstanceFormer on [YouTubeVIS](https://youtube-vos.org/dataset/vis/) and [OVIS](https://songbai.site/ovis/index.html)  with 4 GPUs , run:
 ```bash
 bash configs/train_r50_ytvis.sh
@@ -76,7 +75,7 @@ To train InstanceFormer on multiple nodes, run:
 ```bash
 MASTER_ADDR=<IP address of node 1> NODE_RANK=1 GPUS_PER_NODE=4 ./tools/run_dist_launch.sh 16 ./configs/train_r50_ytvis.sh
 ```
-The model trained on [YTVIS-21](https://youtube-vos.org/challenge/2021/) is used to evaluate [YTVIS-22](https://youtube-vos.org/challenge/2022/) as they share the same training dataset. The trained model weights are available at this [Link](https://drive.google.com/drive/folders/1uAvjjIukcugt7JkCK8KiHQnnoJd0Hgsj?usp=sharing).
+The model trained on [YTVIS-21](https://youtube-vos.org/challenge/2021/) is used to evaluate [YTVIS-22](https://youtube-vos.org/challenge/2022/) as they share the same training dataset. The trained model weights are available at this [link](https://drive.google.com/drive/folders/1uAvjjIukcugt7JkCK8KiHQnnoJd0Hgsj?usp=sharing).
 
 ## Inference & Evaluation
 ```bash
@@ -85,12 +84,12 @@ bash configs/evaluate_r50_ovis.sh
 ```
 
 ## Automatic Upload to Server
-To simplify the laborious process of manually uploading result files to the [Codalab](https://codalab.lisn.upsaclay.fr/) Server, we offer an automatic uploading functionality in the file [Server Process](util/server_process.py). This functionality can be activated During [Inference](inference.py) by adding --upload_file flag. 
+To simplify the laborious process of manually uploading result files to the [Codalab](https://codalab.lisn.upsaclay.fr/) server, we offer an automatic uploading functionality in the file [Server Process](util/server_process.py). This functionality can be activated during [Inference](inference.py) by adding the --upload_file flag. 
 ## Create Plots & Videos
-During [Inference](inference.py) use --analysis flag to save reference points, sampling locations, and instance embeddings. Run [Analysis](util/analysis.py), [TSNE](util/tsne.py), and [Make Video](util/make_video.py) to save the respective plots and videos.
+During [Inference](inference.py), use the --analysis flag to save reference points, sampling locations, and instance embeddings. Run [Analysis](util/analysis.py), [TSNE](util/tsne.py), and [Make Video](util/make_video.py) to save the respective plots and videos.
 
 # Citation
-If you find InstanceFormer useful in your research, please use the following BibTeX entry for citation.
+If you find InstanceFormer useful in your research, please use the following BibTeX entry as a citation.
 
 ```BibTeX
 @article{koner2022instanceformer,
@@ -103,7 +102,7 @@ If you find InstanceFormer useful in your research, please use the following Bib
 
 # Acknowledgement
 
-We acknowledge the following repository from where we have inherited code snippets.
+We acknowledge the following repositories from where we have inherited code snippets.
 
 1. DETR: [[code](https://github.com/facebookresearch/detr)][[paper](https://arxiv.org/abs/2005.12872)]
 2. Deformable-DETR: [[code](https://github.com/fundamentalvision/Deformable-DETR)][[paper](https://arxiv.org/abs/2010.04159)]
