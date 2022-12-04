@@ -1,0 +1,11 @@
+pycocotools
+tqdm
+cython
+scipy
+timm
+imgaug
+opencv-python
+tensorpack
+playwright
+opencv-python
+detectron2~=0.6
