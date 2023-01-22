@@ -171,6 +171,7 @@ def get_args_parser():
     parser.add_argument('--enc_aux_loss', default=False, action="store_true", help='as sparse detr')
     parser.add_argument('--supcon', default=False, action="store_true", help='supervised contrastive loss')
     parser.add_argument('--analysis', default=False, action="store_true", help='analysis while inference')
+    parser.add_argument('--upload_file', default=False, action='store_true', help='automatically upload results to the server')
     parser.add_argument('--propagate_inter_ref_2', default=False, action='store_true')
     parser.add_argument('--sim_match', default=False, action='store_true')
 
