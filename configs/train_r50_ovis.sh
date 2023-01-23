@@ -7,6 +7,7 @@ python -u main.py \
     --ytvis_path path_to_ovis \
     --coco_path path_to_coco \
     --num_frames 3 \
+    --memory_support 3 \
     --dataset_file jointovis \
     --backbone resnet50 \
     --masks \
@@ -21,9 +22,7 @@ python -u main.py \
     --propagate_ref_points \
     --propagate_class \
     --skip_pretrain_detr_temporal_class \
-    --dynamic_memory \
-    --temp_midx_pos \
     --memory_token 10 \
-    --memory_support 3 \
     --supcon \
     --cuda_visible_device 0 1 2 3 \
+

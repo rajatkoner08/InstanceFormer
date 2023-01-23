@@ -12,11 +12,10 @@ def to_cuda(samples, targets, device):
     return samples, targets
 
 class data_prefetcher():
-    def __init__(self, loader, device, prefetch=True, save_memory=False):
+    def __init__(self, loader, device, prefetch=True,):
         self.loader = iter(loader)
         self.prefetch = prefetch
         self.device = device
-        self.save_memory = save_memory
         if prefetch:
             self.stream = torch.cuda.Stream()
             self.preload()
@@ -55,8 +54,7 @@ class data_prefetcher():
             torch.cuda.current_stream().wait_stream(self.stream)
             samples = self.next_samples
             targets = self.next_targets
-            if self.save_memory:
-                img_paths = self.img_paths
+
             if samples is not None:
                 samples.record_stream(torch.cuda.current_stream())
             if targets is not None:
@@ -66,15 +64,11 @@ class data_prefetcher():
             self.preload()
         else:
             try:
-                if self.save_memory:
-                    samples, targets, img_paths = next(self.loader)
-                else:
-                    samples, targets = next(self.loader)
+                samples, targets = next(self.loader)
                 samples, targets = to_cuda(samples, targets, self.device)
             except StopIteration:
                 samples = None
                 targets = None
                 img_paths = None
-        if self.save_memory:
-            return samples, targets, img_paths
+
         return samples, targets

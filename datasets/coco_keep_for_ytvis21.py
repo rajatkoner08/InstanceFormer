@@ -19,4 +19,4 @@ def coto_keep_for_yvis21(coco_path):
 
 if __name__ == '__main__':
     coco_path = "set_coco_path"
-    coto_keep_for_yvis21(coco_path)
+    coto_keep_for_ovis(coco_path)

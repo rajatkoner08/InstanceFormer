@@ -13,15 +13,12 @@ import PIL
 import torch
 import torchvision.transforms as T
 import torchvision.transforms.functional as F
-
 from util.box_ops import box_xyxy_to_cxcywh, box_iou
 from util.misc import interpolate
 import numpy as np
 from numpy import random as rand
 from PIL import Image
 import cv2
-
-
 
 
 class Check(object):
@@ -33,6 +30,8 @@ class Check(object):
             fields.append("boxes")
         if "masks" in target:
             fields.append("masks")
+        if "valid" in target:
+            fields.append("valid")
 
         ### check if box or mask still exist after transforms
         if "boxes" in target or "masks" in target:

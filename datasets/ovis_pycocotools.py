@@ -25,14 +25,10 @@ __author__ = 'jyq'
 
 import json
 import time
-import matplotlib.pyplot as plt
-from matplotlib.collections import PatchCollection
-from matplotlib.patches import Polygon
 import numpy as np
 import copy
 import itertools
 from pycocotools import mask as maskUtils
-import os
 from collections import defaultdict
 import sys
 PYTHON_VERSION = sys.version_info[0]

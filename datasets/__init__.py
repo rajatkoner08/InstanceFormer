@@ -11,7 +11,6 @@
 import torch.utils.data
 from .torchvision_datasets import CocoDetection
 from datasets.ytvos import YTVOSDataset as YTVOSDataset
-
 from .coco import build as build_coco
 from .coco2seq import build as build_seq_coco
 from .concat_dataset import build as build_joint

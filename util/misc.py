@@ -1,5 +1,5 @@
 # ------------------------------------------------------------------------
-# SeqFormer
+# InstanceFormer
 # ------------------------------------------------------------------------
 # Modified from Deformable DETR (https://github.com/fundamentalvision/Deformable-DETR)
 # Copyright (c) 2020 SenseTime. All Rights Reserved.
@@ -559,69 +559,71 @@ def inverse_sigmoid(x, eps=1e-5):
     return torch.log(x1/x2)
 
 
-def get_top_mem_idx(outputs, mtoken, indices=None, val=False, coco=False, memory = None, targets = None, pred_boxes =None, nf = None, gt_usage=None):
+def get_top_mem_idx(outputs, mtoken, indices=None, val=False, coco=False, memory = None, pos_query=None,
+                    targets = None, pred_boxes =None, nf = None, gt_usage=None):
     if torch.is_tensor(outputs):
         pred_logits = outputs
     else:
         pred_logits = outputs['pred_logits'].squeeze()
     if not val:
         with torch.no_grad():
-            batches = []; mem_indices = []; tgt_indices = []; tgt_batches = []; supcon_indices= []
+            batches = []; mem_indices = []; tgt_indices = []; supcon_indices= []
+            num_token =  mtoken
             for i, ind in enumerate(indices):
                 if isinstance(ind, list):
                     ind = ind[0]
                 topk = len(ind[0]) + mtoken
                 top_indices = torch.topk(torch.max(pred_logits[i,...].sigmoid(),dim=-1)[0],k=topk)[1] .squeeze().data.cpu()
-                top_indices = [a for a in top_indices if a not in ind[0]]
-                mem_indices.append(torch.cat((ind[0], torch.stack(top_indices)))[:mtoken])
-                supcon_indices.append(torch.cat((ind[0], torch.full((max(0, mtoken-len(ind[0])),), 301)))[:mtoken])
-                batches.append(torch.full((mtoken,), i))
-                tgt_indices.append(ind[1][:mtoken])
-                tgt_batches.append(torch.full((len(ind[1][:mtoken]),),i))
+                top_indices = [a for a in top_indices if a not in ind[0]] # take only new ind
+                mem_indices.append(torch.cat((ind[0], torch.stack(top_indices)))[:num_token])
+                supcon_indices.append(torch.cat((ind[0], torch.full((max(0, mtoken-len(ind[0])) + mtoken,), 301)))[:num_token]) #todo perhaps better to remove
+                batches.append(torch.full((num_token,), i))
+                tgt_indices.append(ind[1][:num_token])
             if coco:
                 return ([torch.stack(batches),torch.stack(mem_indices)], tgt_indices), torch.stack(supcon_indices)
             elif targets !=None: # for train time dynamic memeory
                 top_idx = [torch.stack(batches), torch.stack(mem_indices)]
-                return (concat_output(memory,pred_logits,pred_boxes,top_idx,mtoken,gt_usage,targets,tgt_indices,nf), top_idx), torch.stack(supcon_indices)
-            else:
-                return ([torch.stack(batches),torch.stack(mem_indices)],[torch.stack(tgt_batches),torch.stack(tgt_indices)]), torch.stack(supcon_indices)
+                top_memory, memory_pos, permute_token = concat_output(memory, pos_query, pred_logits, pred_boxes, top_idx, num_token, gt_usage, targets,
+                                                          tgt_indices, nf)
+                top_idx[1] = top_idx[1][:, permute_token]
+                return (top_memory, memory_pos), torch.stack(supcon_indices)[:, permute_token], top_idx
+
     else:
         topk = []; batches = []
         for i, pred_cls in enumerate(pred_logits):
             topk.append(torch.topk(torch.max(pred_cls.sigmoid(),dim=-1)[0],k=mtoken)[1])
             batches.append(torch.full((mtoken,), i))
         top_idx = [torch.stack(batches),torch.cat(topk)]
-        return (concat_output(memory,pred_logits,pred_boxes,top_idx, mtoken), top_idx), None
+        # todo random permute is ok, but check wd training
+        top_memory, memory_pos, permute_token = concat_output(memory, pos_query, pred_logits, pred_boxes, top_idx, mtoken)
+        return (top_memory, memory_pos), None, None
 
 
-def concat_output(mem,cls,box,top_idx, mtoken, gt_usage=None,targets=None, tgt_indices=None,nf=None):
-    cls_out = cls[top_idx].sigmoid()
-    box_out = box[top_idx]
-    if gt_usage !=None and torch.rand(1) > (1 - gt_usage):  # gradually reduce the gt
-        for j, t in enumerate(targets):
-            box_out[j, :len(tgt_indices[j]), ...] = t['boxes'][nf, ...][tgt_indices[j]]
-            cls_out[j, :len(tgt_indices[j]), ...] = one_hot(t['labels'][tgt_indices[j]],cls.shape[-1])  # make one hot number of class
+def concat_output(mem,mem_pos,cls,box,top_idx, mtoken, gt_usage=None,targets=None, tgt_indices=None,nf=None):
+    #with torch.no_grad():
+        cls_out = cls[top_idx].sigmoid() #todo do we need sigmoid here? as no gradient
+        box_out = box[top_idx]
+        #randomly permute the indexes
+        permute_token = torch.randperm(mtoken)
 
-    return torch.cat((mem[top_idx], cls_out, box_out), dim=-1)[:, torch.randperm(mtoken), ...]  # randomly permute
+        if gt_usage !=None and torch.rand(1) > (1 - gt_usage):  # gradually reduce the gt
+            for j, t in enumerate(targets):
+                # take only valid class and boxes
+                valid_boxes_idx =  t['valid_box'][nf][tgt_indices[j]]
+                valid_cls_idx = t['valid_cls'][nf][tgt_indices[j]]
+
+                box_out[j, :len(tgt_indices[j]), ...][valid_boxes_idx] = t['boxes'][nf, tgt_indices[j],...][valid_boxes_idx]
+                cls_out[j, :len(tgt_indices[j]), ...][valid_cls_idx] = one_hot(t['labels'][nf][tgt_indices[j]][valid_cls_idx],cls.shape[-1]).type(cls_out.dtype)  # make one hot number of class
+
+        return torch.cat((mem[top_idx], cls_out, box_out), dim=-1)[:,permute_token, ...], mem_pos[top_idx][:,permute_token, ...],permute_token  # randomly permute
 
 
-def get_memory_from_disk(filepath, video, num_frames, mframe, mtoken, hidden_dim, idx=None):
-    vid_name = video[0].split('/')[-2]
-    frame_idx = idx if idx !=None else torch.arange(num_frames)
-    total_memories = torch.load(os.path.join(filepath, 'train' if idx!=None else 'val', 'youtubeVOS', vid_name + '.pt'),map_location='cpu')
-    curr_mem = torch.zeros(size=(num_frames, mframe, mtoken, hidden_dim+42+4))
-    curr_mask = torch.ones((num_frames, mframe, mtoken,), dtype=torch.bool)
-    for i, f_id in enumerate(frame_idx):
-        if f_id in [0, 1]:
-            curr_mem[i, 0, ...] = total_memories[0, torch.randperm(mtoken),...] #randomly permute
-            curr_mask[i, 0, ...] = False
-        else:
-            if idx == None: # in case of inferece todo decise strategy
-                m_id =  torch.arange(f_id)[-mframe:] # todo in case of inferece decide seq/least imp
-            else:
-                m_id = torch.arange(f_id)[-mframe:] #sorted(random.sample(range(f_id), f_id)[:mframe])
-            rand_index  = torch.stack([torch.full((mtoken,), i) for i in range(len(m_id))]),torch.stack([torch.randperm(mtoken) for i in range(len(m_id))])
-            curr_mem[i, :len(m_id), ...] = total_memories[m_id, ...][rand_index]
-            curr_mask[i, :len(m_id), ...] = False
+def valid_objs(self, target):
+    labels = target['labels'].repeat(self.num_frames, 1)
+    target['occl'] = torch.zeros(1, dtype=torch.bool)
+    target["valid_box"] = torch.ones(labels.shape, dtype=torch.bool)
+    target['valid_cls'] = target["valid_box"].clone()
 
-    return curr_mem, curr_mask
+    target['matcher_label'] = target['labels'].repeat(self.num_frames,1) # only for matcher as max_class-1
+    target['labels'] = labels
+    return  target

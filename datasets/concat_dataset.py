@@ -33,8 +33,5 @@ def build(image_set, args):
             return ytvis_dataset
         concat_data = ConcatDataset([ coco_seq, ytvis_dataset])
 
-    if args.save2memory: # only for memeory saving, to create large batch processing for coco for faster inference
-        return ytvis_dataset, coco_seq
-    else:
-        return concat_data
+    return concat_data
 

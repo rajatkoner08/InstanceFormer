@@ -8,11 +8,8 @@
 import imgaug
 import imgaug.augmenters as iaa
 import numpy as np
-
 from datetime import datetime
-
 from imgaug.augmentables.segmaps import SegmentationMapsOnImage
-from imgaug.augmentables.bbs import BoundingBox, BoundingBoxesOnImage
 
 
 class ImageToSeqAugmenter(object):
@@ -80,8 +77,6 @@ class ImageToSeqAugmenter(object):
 
             num_instances = len(masks_np)
             masks_np = SegmentationMapsOnImage(self.condense_masks(masks_np), shape=image.shape[:2])
-            # boxs_np = BoundingBoxesOnImage(boxs_np, shape=image.shape[:2])
-
             seed = int(datetime.now().strftime('%M%S%f')[-8:])
             imgaug.seed(seed)
             aug_image, aug_masks = det_augmenter(image=self.basic_augmenter(image=image) , segmentation_maps=masks_np)

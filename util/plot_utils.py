@@ -1,12 +1,10 @@
 # ------------------------------------------------------------------------
-# SeqFormer
+# InstanceFormer Plotting utilities to visualize training logs
 # ------------------------------------------------------------------------
 # Modified from Deformable DETR (https://github.com/fundamentalvision/Deformable-DETR)
 # Copyright (c) 2020 SenseTime. All Rights Reserved.
 # ------------------------------------------------------------------------
-"""
-Plotting utilities to visualize training logs.
-"""
+
 import torch
 import pandas as pd
 import seaborn as sns

@@ -4,7 +4,7 @@
 set -x
 
 python -u inference.py \
-    --img_path path_to_ovis/valid \
+    --ytvis_path path_to_ovis/valid \
     --ann_path path_to_ovis/annotations_valid.json \
     --initial_output_dir your_output_directory \
     --dataset_file jointovis \
@@ -24,3 +24,4 @@ python -u inference.py \
     --memory_support 4 \
     --supcon \
     --cuda_visible_devices 0 \
+

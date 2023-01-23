@@ -16,5 +16,7 @@ python -u inference.py \
     --exp_name r50_ytvis_[19/21/22] \
     --propagate_ref_points \
     --propagate_class \
+    --memory_support 4 \
     --increase_proposals 5 \
     --cuda_visible_devices 0 \
+

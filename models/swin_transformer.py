@@ -1,6 +1,7 @@
 # ------------------------------------------------------------------------
 # Adopted from SeqFormer (https://github.com/wjf5203/SeqFormer)
 # Copyright (c) 2021 Junfeng Wu. All Rights Reserved.
+# ------------------------------------------------------------------------
 # --------------------------------------------------------
 # Modified from Swin Transformer (https://github.com/microsoft/Swin-Transformer) 
 # Copyright (c) 2021 Microsoft

@@ -9,33 +9,26 @@
 
 
 from pathlib import Path
-
 import torch
 import torch.utils.data
-import torchvision
 from .ovis_pycocotools import OVIS
-from pycocotools.ytvoseval import YTVOSeval
 import datasets.transforms_clip as T
 from pycocotools import mask as coco_mask
 import os
 from PIL import Image
 from random import randint
-import cv2
 import random
-import math
-
-import math
-import time
+from util.misc import valid_objs
 
 
 class OVISDataset:
-    def __init__(self, img_folder, ann_file, transforms, return_masks, num_frames, online=False):
+    def __init__(self, img_folder, ann_file, transforms, return_masks, num_frames,num_classes, args):
         self.img_folder = img_folder
         self.ann_file = ann_file
         self._transforms = transforms
         self.return_masks = return_masks
         self.num_frames = num_frames
-        self.online = online
+        self.num_classes = num_classes
         self.prepare = ConvertCocoPolysToMask(return_masks)
         self.ovis = OVIS(ann_file)
         self.cat_ids = self.ovis.getCatIds()
@@ -109,11 +102,13 @@ class OVISDataset:
                 idx = random.randint(0, self.__len__() - 1)
             else:
                 instance_check = True
-        if self.online:
-            target['boxes'] = target['boxes'].view(len(target['labels']), self.num_frames, 4).permute(1, 0,
+
+        target['boxes'] = target['boxes'].view(len(target['labels']), self.num_frames, 4).permute(1, 0,
                                                                                                       2)  # for (#frames,#num_of_instances,4)
-            target['masks'] = target['masks'].view(len(target['labels']), self.num_frames, target['size'][0],
+        target['masks'] = target['masks'].view(len(target['labels']), self.num_frames, target['size'][0],
                                                    target['size'][1]).permute(1, 0, 2, 3)  # (#frames,#num_of_instances,,h,w)
+        # objs are not valid before they enter or after it leaves the frame, while in occlusion are valid
+        target = valid_objs(self, target)
         target['boxes'] = target['boxes'].clamp(1e-6)
         return torch.cat(img, dim=0), target, []
 
@@ -124,8 +119,6 @@ def convert_coco_poly_to_mask(segmentations, height, width, is_crowd):
         if not seg:
             mask = torch.zeros((height, width), dtype=torch.uint8)
         else:
-            # if not is_crowd[i]:
-            #     seg = coco_mask.frPyObjects(seg, height, width)
             mask = coco_mask.decode(seg)
             if len(mask.shape) < 3:
                 mask = mask[..., None]
@@ -259,6 +252,6 @@ def build(image_set, args):
         img_folder, ann_file = PATHS[image_set]
         print('use OVIS dataset')
         dataset = OVISDataset(img_folder, ann_file, transforms=make_coco_transforms(image_set, debug=args.debug),
-                               return_masks=args.masks, num_frames=args.num_frames, online=args.online)
+                               return_masks=args.masks, num_frames=args.num_frames, num_classes=args.num_classes, args = args)
 
     return dataset

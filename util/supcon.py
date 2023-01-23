@@ -1,13 +1,14 @@
-"""
-Author: Yonglong Tian (yonglong@mit.edu)
-Date: May 07, 2020
-"""
+# ------------------------------------------------------------------------
+# InstanceFormer Contrastive Loss
+# ------------------------------------------------------------------------
+# Modified from SupContrast (https://github.com/HobbitLong/SupContrast)
+# Author: Yonglong Tian (yonglong@mit.edu)
+# Date: May 07, 2020
+# ------------------------------------------------------------------------
 from __future__ import print_function
-
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
+import math
 
 class SupConLoss(nn.Module):
     """Supervised Contrastive Learning: https://arxiv.org/pdf/2004.11362.pdf.
@@ -18,6 +19,7 @@ class SupConLoss(nn.Module):
         self.temperature = temperature
         self.contrast_mode = contrast_mode
         self.base_temperature = base_temperature
+
 
     def forward(self, features, labels=None, mask=None):
         """Compute loss for model. If both `labels` and `mask` are None,
@@ -92,15 +94,6 @@ class SupConLoss(nn.Module):
         # loss
         loss = - (self.temperature / self.base_temperature) * mean_log_prob_pos
         loss = loss.view(anchor_count, batch_size).mean()
-
+        if math.isnan(loss):
+            print()
         return loss
-
-
-if __name__ == '__main__':
-    supcon = SupConLoss()
-    features = torch.rand(1024, 1, 256)
-    mask = torch.randint(2, (1024,1024))
-    labels = torch.randint(10, (1024,))
-    features_n = F.normalize(features, p=2, dim=2)
-    loss = supcon(features=features_n, labels=labels)
-

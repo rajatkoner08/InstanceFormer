@@ -10,12 +10,9 @@
 """
 import os
 from pathlib import Path
-
 import torch
 import torch.utils.data
-import yaml
 from pycocotools import mask as coco_mask
-
 from .torchvision_datasets import CocoDetection as TvCocoDetection
 from util.misc import get_local_rank, get_local_size
 import datasets.transforms_clip as T
@@ -24,33 +21,19 @@ import numpy as np
 from PIL import Image
 from util.box_ops import masks_to_boxes
 import random
-from util.misc import NestedTensor
-import torchvision.transforms as TT
+from util.misc import valid_objs
 
 
 class CocoDetection(TvCocoDetection):
     def __init__(self, img_folder, ann_file, transforms, local_rank=0, local_size=1, args=None):
-
-
-        super(CocoDetection, self).__init__(img_folder, ann_file, cache_mode=args.cache_mode, local_rank=local_rank,
-                                             local_size=local_size)
+        super(CocoDetection, self).__init__(img_folder, ann_file, cache_mode=args.cache_mode, local_rank=local_rank, local_size=local_size)
         nt_in_disk = []
-        self.dynamic_memory = args.dynamic_memory
-        if args.memory_support>0 and not self.dynamic_memory: #hot fix for
-            for (id,img) in self.coco.imgs.items():
-                fl = os.path.join(args.save_path, 'train', 'coco',img['file_name'].split('.')[0]+'.pt')
-                if not os.path.exists(fl):
-                   nt_in_disk.append(img['id'])
-                   self.ids.remove(img['id'])
         self._transforms = transforms
         self.num_classes = args.num_classes
         self.prepare = ConvertCocoPolysToMask(args.masks, args.dataset_file, args.ytvis_path)
         self.num_frames = args.num_frames
-        self.online = args.online
-        self.save_memory = args.save2memory
         self.mtoken = args.memory_token
         self.mframe = args.memory_support
-        self.m_path = args.save_path
         self.hidden_dim =  args.hidden_dim
         self.augmenter = ImageToSeqAugmenter(perspective=True, affine=True, motion_blur=True,
                                              rotation_range=(-20, 20), perspective_magnitude=0.08,
@@ -66,10 +49,8 @@ class CocoDetection(TvCocoDetection):
         return images, instance_masks
 
     def __getitem__(self, idx):
-
         instance_check = False
         while not instance_check:
-
             img, target = super(CocoDetection, self).__getitem__(idx)
             image_id = self.ids[idx]
             path = self.coco.loadImgs(image_id)[0]['file_name']
@@ -106,28 +87,19 @@ class CocoDetection(TvCocoDetection):
         for inst_id in range(len(target['boxes'])):
             if target['masks'][inst_id].max() < 1:
                 target['boxes'][inst_id] = torch.zeros(4).to(target['boxes'][inst_id])
-        if self.mframe>0 and not self.dynamic_memory: # load memeory from disk
-            mem_path = os.path.join(self.m_path, 'train', 'coco', path.split('.')[-2] + '.pt')
-            curr_mem = torch.zeros(size=(self.num_frames, self.mframe, self.mtoken, self.hidden_dim + self.num_classes + 4))  # replace num class
-            curr_mask = torch.ones((self.num_frames, self.mframe, self.mtoken,), dtype=torch.bool)
-            if os.path.exists(mem_path):
-                total_memories = torch.load(mem_path,map_location='cpu')
-                for f_id in range(self.num_frames):
-                    curr_mem[f_id, 0, ...] = total_memories[torch.randperm(self.mtoken)]
-                    curr_mask[f_id, 0,...] = False
 
-        if self.online:
-            assert target['boxes'].shape[0] == target['masks'].shape[0]
-            all_instances = target['boxes'].shape[0]
-            target['boxes'] = target['boxes'].view(all_instances // self.num_frames, self.num_frames, 4).permute(1, 0,
-                                                                                                                 2)  # for (#frames,#num_of_instances,4)
-            target['masks'] = target['masks'].view(all_instances // self.num_frames, self.num_frames, target['size'][0],
-                                                   target['size'][1]).permute(1, 0, 2, 3)  # (#frames,#num_of_instances,h,w)
-            if self.mframe>0 and not self.dynamic_memory:
-                target['memory'] = curr_mem; target['memory_mask'] = curr_mask
+        assert target['boxes'].shape[0] == target['masks'].shape[0]
+        all_instances = target['boxes'].shape[0]
+        target['boxes'] = target['boxes'].view(all_instances // self.num_frames, self.num_frames, 4).permute(1, 0,
+                                                                                                             2)  # for (#frames,#num_of_instances,4)
+        target['masks'] = target['masks'].view(all_instances // self.num_frames, self.num_frames, target['size'][0],
+                                               target['size'][1]).permute(1, 0, 2, 3)  # (#frames,#num_of_instances,h,w)
 
+        # objs are not valid before they enter or after it leaves the frame, while in occlusion are valid
+        target = valid_objs(self, target)
 
         target['boxes'] = target['boxes'].clamp(1e-6)
+        target['occl'] = torch.zeros(1, dtype=torch.bool)
         return torch.cat(img, dim=0), target, [path]
 
 
@@ -285,7 +257,7 @@ def build(image_set, args):
         }
 
     img_folder, ann_file = PATHS[image_set]
-    dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(image_set, debug=args.debug, memory=args.save2memory),
+    dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(image_set, debug=args.debug),
                              local_rank=get_local_rank(), local_size=get_local_size(),args=args)
     return dataset
 

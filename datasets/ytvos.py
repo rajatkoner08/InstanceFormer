@@ -1,5 +1,5 @@
 # ------------------------------------------------------------------------
-# InstanceFormer Transformer classes.
+# InstanceFormer Data Loader.
 # ------------------------------------------------------------------------
 # Modified from SeqFormer (https://github.com/wjf5203/SeqFormer)
 # Copyright (c) 2021 Junfeng Wu. All Rights Reserved.
@@ -9,7 +9,6 @@
 
 
 from pathlib import Path
-
 import torch
 import torch.utils.data
 import torchvision
@@ -23,10 +22,9 @@ from random import randint
 import cv2
 import random
 import numpy as np
-
-from util.misc import get_memory_from_disk
+from util.misc import valid_objs
 import torchvision.transforms as TT
-
+from inference import CLASSES,CLASSES_YVIS_22
 
 
 class YTVOSDataset:
@@ -37,8 +35,6 @@ class YTVOSDataset:
         self.num_classes = args.num_classes
         self.return_masks = args.masks
         self.num_frames = args.num_frames
-        self.online = args.online
-        self.save_memory = args.save2memory
         self.hidden_dim = args.hidden_dim
         self.prepare = ConvertCocoPolysToMask(args.masks)
         self.ytvos = YTVOS(ann_file)
@@ -47,85 +43,60 @@ class YTVOSDataset:
         self.vid_infos = []
         self.mtoken = args.memory_token
         self.mframe = args.memory_support
-        self.dynamic_memory =  args.dynamic_memory
-        self.m_path = args.save_path
         for i in self.vid_ids:
             info = self.ytvos.loadVids([i])[0]
             info['filenames'] = info['file_names']
             self.vid_infos.append(info)
         self.img_ids = []
-        if not self.save_memory:
-            for idx, vid_info in enumerate(self.vid_infos):
-                for frame_id in range(len(vid_info['filenames'])):
-                    self.img_ids.append((idx, frame_id))
+        for idx, vid_info in enumerate(self.vid_infos):
+            for frame_id in range(len(vid_info['filenames'])):
+                self.img_ids.append((idx, frame_id))
 
         print('\n video num:', len(self.vid_ids), '  clip num:', len(self.img_ids))
         print('\n')
 
     def __len__(self):
-        if self.save_memory:
-            return len(self.vid_ids)
         return len(self.img_ids)
 
     def __getitem__(self, idx):
-
         instance_check = False
         while not instance_check:
-            if self.save_memory:
-                vid = idx
-                # vid_len = len(self.vid_infos[vid]['file_names'])
-                self.num_frames = len(self.vid_infos[vid]['file_names'])
-                num_frames = self.num_frames
-                sample_indx = []
-            else:
-                vid, frame_id = self.img_ids[idx]
-                vid_len = len(self.vid_infos[vid]['file_names'])
-                # vid_id = self.vid_infos[vid]['id']
-                # img = []
-                # vid_len = len(self.vid_infos[vid]['file_names'])
-                # inds = list(range(self.num_frames))
+            vid, frame_id = self.img_ids[idx]
+            vid_len = len(self.vid_infos[vid]['file_names'])
+            num_frames = self.num_frames
+            # random sparse sample
+            sample_indx = [frame_id]
+            #local sample
+            samp_id_befor = randint(1,3)
+            samp_id_after = randint(1,3)
+            local_indx = [max(0, frame_id - samp_id_befor), min(vid_len - 1, frame_id + samp_id_after)]
+            sample_indx.extend(local_indx)
 
-                num_frames = self.num_frames
-                # random sparse sample
-                sample_indx = [frame_id]
-                #local sample
-                samp_id_befor = randint(1,3)
-                samp_id_after = randint(1,3)
-                local_indx = [max(0, frame_id - samp_id_befor), min(vid_len - 1, frame_id + samp_id_after)]
-                sample_indx.extend(local_indx)
-
-                # global sampling
-                if num_frames > 3:
-                    all_inds = list(range(vid_len))
-                    global_inds = all_inds[:min(sample_indx)]+all_inds[max(sample_indx):]
-                    global_n = num_frames - len(sample_indx)
-                    if len(global_inds) > global_n:
-                        select_id = random.sample(range(len(global_inds)),global_n)
-                        for s_id in select_id:
-                            sample_indx.append(global_inds[s_id])
-                    elif vid_len >=global_n:  # sample long range global frames
-                        select_id = random.sample(range(vid_len),global_n)
-                        for s_id in select_id:
-                            sample_indx.append(all_inds[s_id])
-                    else:
-                        select_id = random.sample(range(vid_len),global_n - vid_len)+list(range(vid_len))
-                        for s_id in select_id:
-                            sample_indx.append(all_inds[s_id])
-                sample_indx.sort()
+            # global sampling
+            if num_frames > 3:
+                all_inds = list(range(vid_len))
+                global_inds = all_inds[:min(sample_indx)]+all_inds[max(sample_indx):]
+                global_n = num_frames - len(sample_indx)
+                if len(global_inds) > global_n:
+                    select_id = random.sample(range(len(global_inds)),global_n)
+                    for s_id in select_id:
+                        sample_indx.append(global_inds[s_id])
+                elif vid_len >=global_n:  # sample long range global frames
+                    select_id = random.sample(range(vid_len),global_n)
+                    for s_id in select_id:
+                        sample_indx.append(all_inds[s_id])
+                else:
+                    select_id = random.sample(range(vid_len),global_n - vid_len)+list(range(vid_len))
+                    for s_id in select_id:
+                        sample_indx.append(all_inds[s_id])
+            sample_indx.sort()
 
             vid_id = self.vid_infos[vid]['id']
             img = []
-
             inds = list(range(self.num_frames))
-
-
             img_paths = []
             for j in range(self.num_frames):
-                if self.save_memory:
-                    sample_indx.append(j)
-                    img_path = os.path.join(str(self.img_folder), self.vid_infos[vid]['file_names'][j])
-                else:
-                    img_path = os.path.join(str(self.img_folder), self.vid_infos[vid]['file_names'][sample_indx[j]])
+                img_path = os.path.join(str(self.img_folder), self.vid_infos[vid]['file_names'][sample_indx[j]])
                 img.append(Image.open(img_path).convert('RGB'))
                 img_paths.append(img_path)
 
@@ -133,7 +104,7 @@ class YTVOSDataset:
             target = self.ytvos.loadAnns(ann_ids)
 
             target = {'video_id': vid, 'annotations': target}
-            target_inds = inds 
+            target_inds = inds
             target = self.prepare(img[0], target, target_inds, sample_inds = sample_indx)
 
             if self._transforms is not None:
@@ -143,18 +114,15 @@ class YTVOSDataset:
                 idx = random.randint(0,self.__len__()-1)
             else:
                 instance_check=True
-            if self.mframe>0 and not self.dynamic_memory:
-                curr_mem, curr_mask = get_memory_from_disk(self.m_path, img_paths,self.num_frames,self.mframe,self.mtoken,self.hidden_dim,sample_indx[:num_frames])
-        if self.online:
-            target['boxes'] = target['boxes'].view(len(target['labels']),self.num_frames,4).permute(1,0,2) # for (#frames,#num_of_instances,4)
-            target['masks'] = target['masks'].view(len(target['labels']),self.num_frames,target['size'][0], target['size'][1]).permute(1,0,2,3) # (#frames,#num_of_instances,,h,w)
-            if self.mframe > 0 and not self.dynamic_memory:
-                target['memory'] = curr_mem; target['memory_mask'] = curr_mask
+
+        target['boxes'] = target['boxes'].view(len(target['labels']),self.num_frames,4).permute(1,0,2) # for (#frames,#num_of_instances,4)
+        target['masks'] = target['masks'].view(len(target['labels']),self.num_frames,target['size'][0], target['size'][1]).permute(1,0,2,3) # (#frames,#num_of_instances,,h,w)
+
+        #objs are not valid before they enter or after it leaves the frame, while in occlusion are valid
+        target = valid_objs(self,target)
+
         target['boxes']=target['boxes'].clamp(1e-6)
-
         return torch.cat(img, dim=0), target, img_paths
-
-
 
 
 def convert_coco_poly_to_mask(segmentations, height, width, is_crowd):
@@ -202,9 +170,8 @@ class ConvertCocoPolysToMask(object):
                 bbox = ann['bboxes'][sample_inds[id]]
                 areas = ann['areas'][sample_inds[id]]
                 segm = ann['segmentations'][sample_inds[id]]
-                # clas = ann["category_id"]
                 # for empty boxes
-                if bbox is None:
+                if bbox is None: # todo replace this with hungariean matching
                     bbox = [0,0,0,0]
                     areas = 0
                     valid.append(0)
@@ -217,7 +184,6 @@ class ConvertCocoPolysToMask(object):
                 segmentations.append(segm)
                 # classes.append(clas)
                 iscrowd.append(crowd)
-                
         # guard against no boxes via resizing
         boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
         boxes[:, 2:] += boxes[:, :2]
@@ -256,10 +222,7 @@ def make_coco_transforms(image_set, debug=False, memory=False):
         T.ToTensor(),
         T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
-
-    # scales = [296, 328, 360, 392]
     scales = [288, 320, 352, 392, 416, 448, 480, 512]
-
     if image_set == 'train' and not memory:
         return T.Compose([
             T.RandomHorizontalFlip(),
@@ -279,10 +242,8 @@ def make_coco_transforms(image_set, debug=False, memory=False):
             normalize,
         ])
 
-
     if image_set == 'val' or memory:
         return T.Compose([
-            # T.RandomResize([800], max_size=1333),
             T.RandomResize([360], max_size=640 if image_set == 'val' else None),
             normalize,
         ])
@@ -295,7 +256,7 @@ def make_coco_transforms(image_set, debug=False, memory=False):
 def build(image_set, args):
     root = Path(args.ytvis_path)
     assert root.exists(), f'provided YTVOS path {root} does not exist'
-    
+
     if args.dataset_file == 'YoutubeVIS' or args.dataset_file == 'jointcoco':
         mode = 'instances'
         PATHS = {
@@ -304,7 +265,6 @@ def build(image_set, args):
         }
         img_folder, ann_file = PATHS[image_set]
         print('use Youtube-VIS dataset')
-        dataset = YTVOSDataset(img_folder, ann_file, transforms=make_coco_transforms(image_set,debug=args.debug, memory=args.save2memory),
-                               args=args)
+        dataset = YTVOSDataset(img_folder, ann_file, transforms=make_coco_transforms(image_set,debug=args.debug), args=args)
 
     return dataset

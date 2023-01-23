@@ -1,5 +1,5 @@
 # ------------------------------------------------------------------------
-# InstanceFormer Sequence Segmentation.
+# InstanceFormer Transformer classes.
 # ------------------------------------------------------------------------
 # Modified from SeqFormer (https://github.com/wjf5203/SeqFormer)
 # Copyright (c) 2021 Junfeng Wu. All Rights Reserved.
@@ -17,49 +17,28 @@ This file provides the definition of the convolutional heads used to predict mas
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from models.segmentation_helper import run_backbone,transformer_postprocess,get_memories
-from util.misc import NestedTensor, get_top_mem_idx, nested_tensor_from_tensor_list, inverse_sigmoid
+from util.misc import NestedTensor, nested_tensor_from_tensor_list
 
 
-
-class SeqFormer(nn.Module):
-    def __init__(self, detr, rel_coord=True, online=True, num_frames=1, freeze_detr=False, propagate_ref_points=False,
-                 propagate_class=False, sg=False, reinitialize_query=False, propagate_inter_ref=False,
-                 memory_as_query= False, dynamic_memory=False, last_ref=False, prop_box=False, temp_midx_pos=False,
-                 frame_wise_loss=False, long_memory=False, dec_ref_prop=False,enc_aux_loss=False,supcon=False,analysis=False):
+class InstanceFormer(nn.Module):
+    def __init__(self, detr, rel_coord=True, num_frames=1, propagate_ref_points=False,
+                 propagate_class=False, supcon=False, analysis=False):
         super().__init__()
         self.detr = detr
         self.rel_coord = rel_coord
-        self.online = online
         self.num_frames = num_frames
         self.propagate_ref_points = propagate_ref_points
-        self.propagate_inter_ref = propagate_inter_ref
-        self.last_ref = last_ref
-        self.prop_box = prop_box
         self.propagate_class = propagate_class
-        self.dec_ref_prop=dec_ref_prop
-        self.sg = sg
-        self.reinitialize_query = reinitialize_query
-        self.memory_as_query = memory_as_query # maintain a short but effictive learnable memory
-        self.temp_midx_pos = temp_midx_pos # use actual pos embedding of top mem index
-        self.frame_wise_loss = frame_wise_loss # backprop loss for each frame separately
-        self.enc_aux_loss = enc_aux_loss
         self.supcon = supcon
-        self.analysis = analysis
-        if self.memory_as_query:
-            self.mem_query = nn.Embedding(self.detr.mtoken, 2*self.detr.transformer.d_model)
-        self.dynamic_memory = dynamic_memory
         self.gt_usage = 0
-        self.long_memory=long_memory
-
         hidden_dim, nheads = detr.transformer.d_model, detr.transformer.nhead
-
         self.in_channels = hidden_dim // 32
         self.dynamic_mask_channels = 8
         self.controller_layers = 3
         self.max_insts_num = 100
         self.mask_out_stride = 4
+        self.analysis = analysis
 
         # dynamic_mask_head params
         weight_nums, bias_nums = [], []
@@ -87,33 +66,8 @@ class SeqFormer(nn.Module):
 
         self.mask_head = MaskHeadSmallConv(hidden_dim, None, hidden_dim)
 
-    def per_frame_loss(self, criterion, frame, gt_targets, indices_list, o_classes, o_cord, o_maks, optimizer,
-                       output_per_frame, per_frame_losses, valid_ratios):
-        output_per_frame['pred_logits'] = o_classes[None, -1, ...]  # [#frames,bs,#query,#numclasses]
-        output_per_frame['pred_boxes'] = o_cord[None, -1, ...]
-        output_per_frame['pred_masks'] = o_maks[None, -1, ...]  # [masks[-1] for masks in outputs_mask]
-        if self.detr.aux_loss:
-            output_per_frame['aux_outputs'] = self._set_aux_loss(o_classes[None, ...], o_cord[None, ...],
-                                                                 o_maks[None, ...])
-        gt_target_per_frame = [{} for sub in range(len(gt_targets))]
-        for batch_id in range(len(gt_targets)):
-            gt_target_per_frame[batch_id]['boxes'] = gt_targets[batch_id]['boxes'][frame, None, ...]
-            gt_target_per_frame[batch_id]['masks'] = gt_targets[batch_id]['masks'][frame, None, ...]
-            gt_target_per_frame[batch_id]['labels'] = gt_targets[batch_id]['labels']
-            gt_target_per_frame[batch_id]['image_id'] = gt_targets[batch_id]['image_id']
-            gt_target_per_frame[batch_id]['area'] = gt_targets[batch_id]['area']
-            gt_target_per_frame[batch_id]['iscrowd'] = gt_targets[batch_id]['area']
-            gt_target_per_frame[batch_id]['orig_size'] = gt_targets[batch_id]['orig_size']
-            gt_target_per_frame[batch_id]['size'] = gt_targets[batch_id]['size']
-        loss_dict_per_frame = criterion(output_per_frame, gt_target_per_frame, indices_list, valid_ratios)
-        weight_dict_per_frame = criterion.weight_dict
-        losses = sum(loss_dict_per_frame[k] * weight_dict_per_frame[k]
-                     for k in loss_dict_per_frame.keys() if k in weight_dict_per_frame)
-        optimizer.zero_grad()
-        losses.backward(retain_graph=True)
-        per_frame_losses.append(loss_dict_per_frame)
 
-    def forward(self, samples: NestedTensor, gt_targets, criterion, optimizer, train=False, save_memory=False):
+    def forward(self, samples: NestedTensor, gt_targets, criterion):
         if gt_targets[0]['boxes'].dim() == 2:
             for gt_target in gt_targets:
                 gt_target['boxes'] = gt_target['boxes'][None,...]
@@ -129,33 +83,16 @@ class SeqFormer(nn.Module):
         query_embed = query_embed.unsqueeze(0).expand(np // self.num_frames, -1, -1)
         tgt = tgt.unsqueeze(0).expand(np // self.num_frames, -1, -1)
 
-        if self.memory_as_query:
-            mem_query, mem_query_pos = torch.split(self.mem_query.weight,c,dim=1)
-            mem_query_pos = mem_query_pos.unsqueeze(0).expand(np // self.num_frames, -1, -1)
-            mem_query = mem_query.unsqueeze(0).expand(np // self.num_frames, -1, -1)
-        else:
-            mem_query_pos = mem_query = None
-        #load the memeory
-        if self.detr.mframe>0:
-            if self.dynamic_memory:
-                #nf,c,b,memory_token
-                memory_pos = self.detr.memory_pos(mask=torch.zeros((np // self.num_frames, self.num_frames,
-                                                                     1 if self.temp_midx_pos else self.detr.mtoken), dtype=torch.bool,device=tgt.device))
-                #memory_pos = memory_pos.permute(1,0,2,3)
-            else:
-                token_memory = torch.cat([t['memory'] for t in gt_targets])
-                bs_nf,mf,nt,c = token_memory.shape # batch*frames,mem frames, mem cls, c
-                token_memory = token_memory.reshape(bs_nf // self.num_frames, self.num_frames, c, mf, nt).permute(1,0,2,3,4)
-                mem_mask =  torch.cat([t['memory_mask'] for t in gt_targets])
-                memory_pos = self.detr.memory_pos(mask = mem_mask)
-                mem_mask =  mem_mask.reshape(bs_nf // self.num_frames, self.num_frames, mf, nt).permute(1,0,2,3)
-                memory_pos = memory_pos.reshape(bs_nf // self.num_frames, self.num_frames, self.detr.transformer.d_model, mf, nt).permute(1,0,2,3,4)
+        #load the memeory position encoding
+        if self.detr.mframe>0 and self.detr.mtoken:
+            #nf,c,b,memory_token
+            temporal_mem_pos = self.detr.memory_pos(mask=torch.zeros((np // self.num_frames, self.num_frames,1 ), dtype=torch.bool, device=tgt.device))
+
         hs_mem = []
-        hs_index = []
-        supcon_indices = []
+        supcon_feats = []
+        supcon_idx = []
         hs_mem_pos = []
-        idxs = []
-        indices_list = []
+        all_indices = []
         outputs = {}
         outputs_classes = []
         outputs_coords = []
@@ -163,68 +100,43 @@ class SeqFormer(nn.Module):
 
         hs = None  # set initial hidden state to None, that it be uses in loop
         init_reference = None
-        inter_references = None
         t_classes = []
 
-        frame_mem = None; frame_mem_pos = None; frame_mem_mask = None; enc_sample_loc =None;dec_sample_loc_new=None
-        per_frame_losses = []
-        dec_sample_loc_list = []
-        dec_sample_loc_list_new = []
-        enc_inter_outputs_class_list = []
-        enc_inter_outputs_coord_list = []
+        instance_mem = None; instance_mem_pos = None; frame_mem_mask = None; enc_sample_loc =None;
         for frame in range(self.num_frames): #overall dimension [#bs,#frame,#chanel,H,W ]
-            output_per_frame = {}
             frame_lbl_src = [src[:, frame, :, :, :].unsqueeze(1) for src in srcs]
             frame_lbl_mask = [mask[:, frame, :, :].unsqueeze(1) for mask in masks]
             frame_lbl_pos = [pos[:, frame, :, :, :].unsqueeze(1) for pos in poses]
-            if self.detr.mframe > 0:
-                frame_mem, frame_mem_pos, frame_mem_mask = get_memories(self,frame,hs_mem,memory_pos,hs,mem_query,hs_mem_pos)
 
-            if self.last_ref and inter_references is not None:
-                #init_reference = self.last_ref_proj(inverse_sigmoid(inter_references[-1])).sigmoid()
-                init_reference = inter_references[-1, ..., :2]
-            elif self.prop_box and len(outputs_coords) != 0:
-                init_reference[...,:self.detr.num_queries,:] = outputs_coords[-1][-1, None, ..., :2]
-            hs, hs_box, memory, init_reference, inter_references, inter_samples, enc_outputs_class, valid_ratios,\
-            enc_sample_loc, mem_query, mem_query_pos, dec_sample_loc,dec_sample_loc_new,lvl_start_idx, topk, \
-                enc_inter_outputs_class, enc_inter_outputs_coord, sampling_locations_all= \
-                self.detr.transformer(frame_lbl_src, frame_lbl_mask, frame_lbl_pos, query_embed,
-                                      tgt if hs==None else hs[-1, ...].detach() if self.sg else hs[-1,...],
-                                      (init_reference.detach() if self.sg else init_reference) if
+            if frame > 0 and self.detr.mframe > 0 and self.detr.mtoken>0:
+                instance_mem, instance_mem_pos, frame_mem_mask = get_memories(self, frame, hs_mem, temporal_mem_pos,hs_mem_pos)
+
+
+            hs, memory, init_reference, inter_references, inter_samples, enc_outputs_class, valid_ratios,\
+            lvl_start_idx, sampling_locations_all = self.detr.transformer(frame_lbl_src, frame_lbl_mask, frame_lbl_pos, query_embed,
+                                      tgt if hs==None else hs[-1,...],
+                                      (init_reference) if
                                       (self.propagate_ref_points and init_reference is not None) else None,
-                                      (inter_references.detach() if self.sg else inter_references) if
-                                      (self.propagate_inter_ref and inter_references is not None) else None,
-                                      frame_mem, frame_mem_pos, frame_mem_mask, mem_query, mem_query_pos,
-                                      enc_sample_loc= enc_sample_loc, dec_sample_loc=dec_sample_loc_new)
+                                      instance_mem, instance_mem_pos,frame_mem_mask)
             hs = hs.squeeze(2)
             valid_ratios = valid_ratios[:, 0]
-            if self.enc_aux_loss:
-                enc_inter_outputs_class_list.append(enc_inter_outputs_class)
-                enc_inter_outputs_coord_list.append(enc_inter_outputs_coord)
-            if frame!=0 and self.dec_ref_prop:
-                dec_sample_loc_list.append(dec_sample_loc)
-                dec_sample_loc_list_new.append(dec_sample_loc_new)
             # calculate class , box, seg mask
-            o_classes, o_cord, o_maks, top_mem, t_classes, supcon_ind = transformer_postprocess(self, hs, memory, init_reference,
-                                                                                    inter_references,spatial_shapes, frame,
-                                                                                     gt_targets = gt_targets, criterion=criterion,
-                                                                                    indices_list=indices_list, t_classes=t_classes,
-                                                                                    valid_ratios=valid_ratios)
-
+            o_classes, o_cord, o_maks, top_mem, t_classes, supcon_ind, all_indices, idx_permute = transformer_postprocess(self, hs,memory, init_reference,
+                                                                                    inter_references,spatial_shapes,frame, gt_targets = gt_targets,
+                                                                                    criterion=criterion,indices_list=all_indices,
+                                                                                    t_classes=t_classes, query_embed = query_embed)
+            #all_indices.append(frame_indices)
             outputs_classes.append(o_classes)
             outputs_coords.append(o_cord)
             outputs_mask.append(o_maks)
 
-            if self.frame_wise_loss:
-                self.per_frame_loss(criterion, frame, gt_targets, indices_list, o_classes, o_cord, o_maks, optimizer,
-                                    output_per_frame, per_frame_losses, valid_ratios)
-
-            if save_memory or self.dynamic_memory:
+            if self.detr.mframe >0  and self.detr.mtoken > 0:
+                #sud nt be any gradient
                 hs_mem.append(top_mem[0])
-                hs_index.append(top_mem[1])
-                supcon_indices.append(supcon_ind)
-                if self.temp_midx_pos:
-                    hs_mem_pos.append(query_embed[top_mem[1]].detach())
+                supcon_feats.append(hs[-1,...][idx_permute])
+                hs_mem_pos.append(top_mem[1])
+                supcon_idx.append(supcon_ind)
+
         # bs, outputs_mask = len(outputs_masks[0]), []
         # outputs_masks: dec_num x bs x [1, num_insts, 1, h, w]
         outputs_class = torch.stack(outputs_classes) #[#frames,#layer,bs,#query,#numclasses]
@@ -237,180 +149,125 @@ class SeqFormer(nn.Module):
 
         if self.detr.aux_loss:
             outputs['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord, outputs_mask)
-        if save_memory:
-            outputs['hs']= torch.stack(hs_mem)
-            outputs['indices'] =idxs
         if self.supcon:
-            outputs['hs'] = torch.stack(hs_mem)
-            outputs['hs_index'] = torch.stack(supcon_indices) #torch.stack([a[1] for a in hs_index]) #
-        if self.dec_ref_prop:
-            outputs["dec_sample_loc_list"] = dec_sample_loc_list
-            outputs["dec_sample_loc_list_new"] = dec_sample_loc_list_new
-            outputs["spatial_shapes"] = spatial_shapes
-            outputs["level_start_index"] = lvl_start_idx
-            outputs['mask_flatten'] = torch.cat([m.flatten(2) for m in masks], 2)[:,1:,:]
-            outputs["num_topk"] = topk
+            outputs['supcon_feats'] = torch.stack(supcon_feats).transpose(1,0) #b,nf,mtoken,hidden_dim
+            outputs['supcon_idx'] = torch.stack(supcon_idx).transpose(1,0)
 
-        if self.enc_aux_loss:
-            outputs['aux_outputs_enc'] = self._set_enc_aux_loss(enc_inter_outputs_class_list,enc_inter_outputs_coord_list)
+        loss_dict = criterion(outputs, gt_targets, all_indices, valid_ratios)
 
-        # # Retrieve the matching between the outputs of the last layer and the targets
-        # outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs' and k != 'enc_outputs'}
-        if self.frame_wise_loss:
-            loss_dict = {k: sum(d[k] for d in per_frame_losses)/len(per_frame_losses) for k in per_frame_losses[0]}
-        else:
-            loss_dict = criterion(outputs, gt_targets, indices_list, valid_ratios)
-
-        if not train and not save_memory:
-            outputs['reference_points'] = inter_references[-2, :, :, :, :2]
-            dynamic_mask_head_params = self.controller(hs[-1])  # [bs, num_quries, num_params]
-            bs, num_queries, _ = dynamic_mask_head_params.shape
-            num_insts = [num_queries for i in range(bs)]
-            reference_points = []
-            for i, gt_target in enumerate(gt_targets):
-                orig_h, orig_w = gt_target['size']
-                scale_f = torch.stack([orig_w, orig_h], dim=0)
-                ref_cur_f = outputs['reference_points'][i] * scale_f[None, None, :]
-                reference_points.append(ref_cur_f.unsqueeze(0))
-            # import pdb;pdb.set_trace()
-            # reference_points: [1, N * num_queries, 2]
-            # mask_head_params: [1, N * num_queries, num_params]
-            reference_points = torch.cat(reference_points, dim=2)
-            mask_head_params = dynamic_mask_head_params.reshape(1, -1, dynamic_mask_head_params.shape[-1])
-            # mask prediction
-            outputs = self.forward_mask_head_train(outputs, memory, spatial_shapes, reference_points, mask_head_params, num_insts)
-            # outputs['pred_masks']: [bs, num_queries, num_frames, H/4, W/4]
-            outputs['pred_masks'] = torch.cat(outputs['pred_masks'], dim=0)
-            outputs['pred_boxes'] = outputs['pred_boxes'][:, 0]
-            outputs['reference_points'] = outputs['reference_points'][:, 0]
-            # import pdb;pdb.set_trace()
         return outputs, loss_dict
 
 
-    def inference(self, samples: NestedTensor, orig_w, orig_h,  all_token_mem, all_mask, memory_pos, shorten_video=False, final_only=True,save_memory=False):
-        if not isinstance(samples, NestedTensor):
-            samples = nested_tensor_from_tensor_list(samples)
-        # run backbone
-        srcs, masks, poses, spatial_shapes, np, c = run_backbone(self, samples, train=False)
+    def inference(self, samples: NestedTensor, orig_w, orig_h, temporal_mem_pos, fast_inference):
+        if fast_inference:
+            if not isinstance(samples, NestedTensor):
+                samples = nested_tensor_from_tensor_list(samples)
+            #run backbone
+            srcs, masks, poses, spatial_shapes, np, c = run_backbone(self, samples, train=False)
+
+        c = [a for a in self.detr.input_proj.parameters()][-1].shape[0]
         #query
         query_embeds = self.detr.query_embed.weight
         # split query  to tgt and position emb
         query_embed, tgt = torch.split(query_embeds, c, dim=1)
         query_embed = query_embed.unsqueeze(0)# .expand(np // self.num_frames, -1, -1)
         tgt = tgt.unsqueeze(0)#.expand(np // self.num_frames, -1, -1)
-        if self.memory_as_query:
-            mem_query, mem_query_pos = torch.split(self.mem_query.weight,c,dim=1)
-            mem_query_pos = mem_query_pos.unsqueeze(0).expand(np // self.num_frames, -1, -1)
-            mem_query = mem_query.unsqueeze(0).expand(np // self.num_frames, -1, -1)
-        else:
-            mem_query_pos = mem_query = None
 
-        if self.dynamic_memory:
-            #nf,c,b,memory_token
-            memory_pos = self.detr.memory_pos(mask=torch.zeros((1, self.detr.mframe if self.memory_as_query else  self.detr.mframe-1,
-                                                                1 if self.temp_midx_pos else self.detr.mtoken), dtype=torch.bool,device=tgt.device)) # for inference bs=1
+        #nf,c,b,memory_token
+        if self.detr.mframe > 0 and self.detr.mtoken >0 :
+            temporal_mem_pos = self.detr.memory_pos(mask=torch.zeros((1, self.detr.mframe - 1, 1), dtype=torch.bool, device=tgt.device)) # for inference bs=1
 
         outputs = {}
         outputs_classes = []
         outputs_coords = []
         outputs_mask = []
-        hs_analysis = []
-        ref_analysis = []
-        init_ref_analysis = []
+        outputs_features = []
         hs_mem = []
         hs_mem_pos = []
-        if self.long_memory:
-            hs_mem_long = []
-            hs_mem_pos_long = []
         hs = None  # set initial hidden state to None, that it be uses in loop
         init_reference = None
-        inter_references = None
         t_classes = []
-        enc_sample_loc = None
-        dec_sample_loc_new = None
-        vid_range = min(25, self.num_frames) if shorten_video else self.num_frames
         frame_mem = frame_mem_pos = frame_mem_mask = None;
-        for frame in range(vid_range):  # overall dimension [#bs,#frame,#chanel,H,W ]
-            frame_lbl_src = [src[frame, :, :, :][None,None,...] for src in srcs]
-            frame_lbl_mask = [mask[frame, :, :][None,None,...] for mask in masks]
-            frame_lbl_pos = [pos[frame, :, :, :][None,None,...] for pos in poses]
-            if self.detr.mframe > 0:
-                frame_mem, frame_mem_pos, frame_mem_mask = get_memories(self, frame, hs_mem, memory_pos,hs,mem_query,hs_mem_pos)
-            if self.last_ref and inter_references is not None:
-                init_reference = inter_references[-1,...,:2]
-            elif self.prop_box and len(outputs_coords) != 0:
-                init_reference[...,:self.detr.num_queries,:] = outputs_coords[-1][-1,None,...,:2]
-            hs, hs_box, memory, init_reference, inter_references, inter_samples, enc_outputs_class, valid_ratios,\
-            enc_sample_loc, mem_query, mem_query_pos, dec_sample_loc, dec_sample_loc_new,lvl_start_idx, topk,\
-            enc_inter_outputs_class, enc_inter_outputs_coord, sampling_locations_all= self.detr.transformer(frame_lbl_src, frame_lbl_mask, frame_lbl_pos, query_embed,
-                                        tgt if hs == None else hs[-1, ...], init_reference if self.propagate_ref_points else None,
-                                        inter_references if self.propagate_inter_ref else None,
-                                        frame_mem, frame_mem_pos, frame_mem_mask, mem_query, mem_query_pos,
-                                         enc_sample_loc= enc_sample_loc, dec_sample_loc=dec_sample_loc_new)
+
+
+        for frame in range(self.num_frames):  # overall dimension [#bs,#frame,#chanel,H,W ]
+            if fast_inference:
+                frame_lbl_src = [src[frame, :, :, :][None, None, ...] for src in srcs]
+                frame_lbl_mask = [mask[frame, :, :][None, None, ...] for mask in masks]
+                frame_lbl_pos = [pos[frame, :, :, :][None, None, ...] for pos in poses]
+            else:
+                # run backbone for image
+                sample = nested_tensor_from_tensor_list(samples[frame,None])
+                srcs, masks, poses, spatial_shapes, np, c = run_backbone(self, sample, train=False)
+
+                frame_lbl_src = [src[0, :, :, :][None,None,...] for src in srcs]
+                frame_lbl_mask = [mask[0, :, :][None,None,...] for mask in masks]
+                frame_lbl_pos = [pos[0, :, :, :][None,None,...] for pos in poses]
+
+            #add st pos embedding with mem , ready for transformer
+            if self.detr.mframe > 0 and self.detr.mtoken > 0 and frame >0:
+                frame_mem, frame_mem_pos, frame_mem_mask = get_memories(self, frame, hs_mem, temporal_mem_pos, hs_mem_pos=hs_mem_pos)
+
+            #call transformer for each frame
+            hs, memory, init_reference, inter_references, inter_samples, enc_outputs_class, \
+            valid_ratios, lvl_start_idx, sampling_locations_all = self.detr.transformer(frame_lbl_src, frame_lbl_mask, frame_lbl_pos,
+                query_embed, tgt if hs == None else hs[-1, ...], (init_reference) if self.propagate_ref_points else None,
+                frame_mem, frame_mem_pos, frame_mem_mask)
+
             hs = hs.squeeze(2)
-            if self.analysis:
-                hs_analysis.append(hs[-1, ...].squeeze())
-                ref_analysis.append(sampling_locations_all.squeeze()[...,:2].sigmoid())
-                init_ref_analysis.append(init_reference.squeeze())
             # calculate class, box, mask
-            o_classes, o_cord, o_maks, top_mem, t_classes, _ = transformer_postprocess(self,hs, memory, init_reference, inter_references,
-                                                                        spatial_shapes, frame, orig_w, orig_h,t_classes=t_classes, final_only=True)
+            o_classes, o_cord, o_maks, top_mem, t_classes, _, _, _ = transformer_postprocess(self, hs, memory, init_reference,
+                                                                                       inter_references,
+                                                                                       spatial_shapes, frame, orig_w,
+                                                                                       orig_h, t_classes=t_classes,
+                                                                                       final_only=True,
+                                                                                       query_embed=query_embed)
 
             outputs_classes.append(o_classes)
             outputs_coords.append(o_cord)
             outputs_mask.append(o_maks)
+            outputs_features.append(hs[-1]) #MODIF
 
-            if save_memory or self.dynamic_memory:
-                if self.long_memory:
-                    hs_mem_long.append(top_mem[0])
-                    if self.temp_midx_pos:
-                        hs_mem_pos_long.append(query_embed[top_mem[1]])
-                    if len(hs_mem) > 4: # delete old memories
-                        del hs_mem_long[0]
-                        if self.temp_midx_pos:
-                            del hs_mem_pos_long[0]
-                    if frame<3:
-                        hs_mem = hs_mem_long
-                        hs_mem_pos = hs_mem_pos_long
-                    else:
-                        mem_idx = self.long_mem_index(frame)
-                        hs_mem = [hs_mem_long[m_i] for m_i in mem_idx]
-                        hs_mem_pos = [hs_mem_pos_long[m_i] for m_i in mem_idx]
-                else:
-                    hs_mem.append(top_mem[0])
-                    if self.temp_midx_pos:
-                        hs_mem_pos.append(query_embed[top_mem[1]])
-                    if len(hs_mem) > self.detr.mframe-1: # delete old memories
-                        del hs_mem[0]
-                        if self.temp_midx_pos:
-                            del hs_mem_pos[0]
-        # outputs_masks: dec_num x bs x [1, num_insts, 1, h, w]
+            if self.detr.mframe > 0 and self.detr.mtoken > 0:
+                hs_mem.append(top_mem[0])
+                hs_mem_pos.append(top_mem[1])
+                if len(hs_mem) > self.detr.mframe-1: # delete old memories
+                    del hs_mem[0]
+                    del hs_mem_pos[0]
+
+            if self.analysis:
+                if (frame==0):
+                    num_queries_, query_dim_ = hs[-1, ...].squeeze().size()
+                    layers_,_, heads, scales, num_samp_, num_coord = sampling_locations_all.squeeze()[..., :2].size()
+                    hs_analysis = torch.empty((self.num_frames,num_queries_,query_dim_ )).to(query_embed)
+                    ref_analysis = torch.empty( (self.num_frames,1,num_queries_, heads, scales, num_samp_, num_coord) ).to(query_embed)
+
+                    init_ref_analysis= torch.empty( (self.num_frames, num_queries_, num_coord) ).to(query_embed)
+
+                hs_analysis[frame] = hs[-1, ...].squeeze()
+                ref_analysis[frame] = sampling_locations_all.squeeze()[...,:2].sigmoid()[-1,...].unsqueeze(0)
+                init_ref_analysis[frame] = init_reference.squeeze()
+
         outputs_class = torch.stack(outputs_classes)  # [#frames,#layer,bs,#query,#numclasses]
         outputs_coord = torch.stack(outputs_coords)  # [#frames,#layer,bs,#query,#numclasses]
         outputs_mask = torch.stack(outputs_mask)  # frames,#layer,#num instances,1,H,W]
+        outputs_features = torch.stack(outputs_features) #MODIF
         outputs['pred_logits'] = outputs_class[:, -1, ...]  # [#frames,bs,#query,#numclasses]
         outputs['pred_boxes'] = outputs_coord[:, -1, ...]
         outputs['pred_masks'] = outputs_mask[:, -1, ...]  # [masks[-1] for masks in outputs_mask]
+        outputs['pred_features'] = outputs_features.squeeze(1) # MODIF
+        torch.cuda.empty_cache()
         if self.analysis:
-            outputs['hs_analysis'] = torch.stack(hs_analysis)
-            outputs['ref_analysis'] = torch.stack(ref_analysis)
-            outputs['init_ref_analysis'] = torch.stack(init_ref_analysis)
+            outputs['hs_analysis'] = hs_analysis
+            outputs['ref_analysis'] = ref_analysis
+            outputs['init_ref_analysis'] = init_ref_analysis
         return outputs
-
-    def long_mem_index(self, frame):
-        # if frame>9:
-        #     return frame - 2, frame - 5, frame - 10
-        if frame>4:
-            if frame%2==0:
-                return frame - 2, max(frame - 3, 2), max(frame - 4, 0)
-            else:
-                return frame - 2, max(frame - 3, 1), max(frame - 4, 0)
-        return 2,1,0
 
 
     def forward_mask_head_train(self, outputs, feats, spatial_shapes, reference_points, mask_head_params, num_insts):
         bs, n_f, _, c = feats.shape
         # nq = mask_head_params.shape[1]
+
         # encod_feat_l: num_layers x [bs, C, num_frames, hi, wi]
         encod_feat_l = []
         spatial_indx = 0
@@ -436,6 +293,7 @@ class SeqFormer(nn.Module):
                                                         mask_feat_stride=8,
                                                         rel_coord=self.rel_coord)
             # mask_logits: [1, num_queries_all, H/4, W/4]
+
             # mask_f = mask_logits.unsqueeze(2).reshape(bs, nq, 1, decod_feat_f.shape[-2], decod_feat_f.shape[-1])  # [bs, selected_queries, 1, H/4, W/4]
             mask_f = []
             inst_st = 0
@@ -443,7 +301,9 @@ class SeqFormer(nn.Module):
                 # [1, selected_queries, 1, H/4, W/4]
                 mask_f.append(mask_logits[:, inst_st: inst_st + num_inst, :, :].unsqueeze(2))
                 inst_st += num_inst
+
             pred_masks.append(mask_f)
+
             # outputs['pred_masks'] = torch.cat(pred_masks, 2) # [bs, selected_queries, num_frames, H/4, W/4]
         output_pred_masks = []
         for i, num_inst in enumerate(num_insts):

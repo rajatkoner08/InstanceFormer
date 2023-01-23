@@ -6,6 +6,7 @@ set -x
 python -u main.py \
       --coco_path path_to_coco \
       --num_frames 1 \
+      --memory_support 1 \
       --dataset_file coco \
       --backbone resnet50 \
       --masks \
