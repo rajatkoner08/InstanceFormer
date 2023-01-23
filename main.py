@@ -12,33 +12,37 @@ import os
 import random
 import time
 from pathlib import Path
-
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-import datasets
 from torch.utils.tensorboard import SummaryWriter
 import util.misc as utils
 import datasets.samplers as samplers
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
-
 from arg_parse import get_args_parser
+
+def seed_torch(seed):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # if you are using multi-GPU.
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
 
 
 def main(args):
     utils.init_distributed_mode(args)
     args.train = True
     device = torch.device(args.device)
-    if args.debug:  # only for debug
+    if args.debug:
         args.num_workers = 0
 
     # fix the seed for reproducibility
-    seed = args.seed + utils.get_rank()
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
+    seed_torch(args.seed + utils.get_rank())
 
     model, criterion, postprocessors = build_model(args)
 
@@ -60,11 +64,9 @@ def main(args):
             sampler_val = samplers.DistributedSampler(dataset_val, shuffle=False)
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
-        # sampler_val = torch.utils.data.SequentialSampler(dataset_val, shuffle=False)
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
-    batch_sampler_train = torch.utils.data.BatchSampler(
-        sampler_train, args.batch_size, drop_last=True)
+    batch_sampler_train = torch.utils.data.BatchSampler(sampler_train, args.batch_size, drop_last=True)
 
     data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
                                    collate_fn=utils.collate_fn, num_workers=args.num_workers,
@@ -73,7 +75,7 @@ def main(args):
                                  drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers,
                                  pin_memory=True)
 
-    # lr_backbone_names = ["backbone.0", "backbone.neck", "input_proj", "transformer.encoder"]
+
     def match_name_keywords(n, name_keywords):
         out = False
         for b in name_keywords:
@@ -103,11 +105,10 @@ def main(args):
     ]
 
     if args.sgd:
-        optimizer = torch.optim.SGD(param_dicts, lr=args.lr, momentum=0.9,
-                                    weight_decay=args.weight_decay)
+        optimizer = torch.optim.SGD(param_dicts, lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
     else:
-        optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
-                                      weight_decay=args.weight_decay)
+        optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
+
     lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, args.lr_drop)
 
     if args.distributed:
@@ -123,12 +124,12 @@ def main(args):
 
     tensorboard_step = 0
 
-    if args.resume:# is not None:
+    if args.resume:
         resume_path = f'{args.initial_output_dir}/experiments/{args.exp_name}/checkpoint.pth'
         print('resume from ', resume_path)
         checkpoint = torch.load(resume_path, map_location='cpu')
         model_without_ddp.load_state_dict(checkpoint['model'], strict=True)
-        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
+        if 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
             import copy
             p_groups = copy.deepcopy(optimizer.param_groups)
             optimizer.load_state_dict(checkpoint['optimizer'])
@@ -137,11 +138,9 @@ def main(args):
                 pg['initial_lr'] = pg_old['initial_lr']
             # print(optimizer.param_groups)
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-            # todo: this is a hack for doing experiment that resume from checkpoint and also modify lr scheduler (e.g., decrease lr in advance).
             args.override_resumed_lr_drop = True
             if args.override_resumed_lr_drop:
-                print(
-                    'Warning: (hack) args.override_resumed_lr_drop is set to True, so args.lr_drop would override lr_drop in resumed lr_scheduler.')
+                print('Warning: (hack) args.override_resumed_lr_drop is set to True, so args.lr_drop would override lr_drop in resumed lr_scheduler.')
                 lr_scheduler.last_epoch = args.start_epoch
                 lr_scheduler.step_size = args.lr_drop
                 lr_scheduler.base_lrs = list(map(lambda group: group['initial_lr'], optimizer.param_groups))
@@ -161,10 +160,9 @@ def main(args):
                         del_list.append(k)
                 if 'detr.class_embed' in k:
                     del_list.append(k)
-                if args.skip_pretrain_detr_decoder:
-                    if 'detr.transformer.decoder' in k:
-                        del_list.append(k)
-                if args.skip_pretrain_detr_temporal_class:
+
+                # for ovis we delete temporal cls embedding to start with ytvis pretrained weights
+                if args.dataset_file in ('jointovis'):
                     if 'detr.temporal_class_embed' in k:
                         del_list.append(k)
             for k in del_list:
@@ -172,13 +170,6 @@ def main(args):
             model_without_ddp.load_state_dict(checkpoint, strict=False)
         else:
             print(' keep all the weights')
-            del_list = []
-            if args.skip_pretrain_detr_decoder:
-                for k, v in checkpoint.copy().items():
-                    if 'detr.transformer.decoder' in k:
-                            del_list.append(k)
-                for k in del_list:
-                    del checkpoint[k]
             model_without_ddp.load_state_dict(checkpoint, strict=True)
 
     output_dir = os.path.join(args.initial_output_dir, "experiments", args.exp_name)
@@ -194,29 +185,13 @@ def main(args):
     print("Start training")
     start_time = time.time()
 
-    gt_usage = [0.7,0.5,0.3,0.15,0.05] # amount of gt data to be used
-
     for epoch in range(args.start_epoch, args.epochs):
-        model.gt_usage = gt_usage[-1] if epoch >= len(gt_usage) else gt_usage[epoch]
         if args.distributed:
             sampler_train.set_epoch(epoch)
-        #current number of frames
-        if args.increase_nf_epochs !=None and  epoch in args.increase_nf_epochs:
-            curr_nf = args.num_frames + args.increase_nf_epochs.index(epoch)+1
-            model.num_frames = curr_nf
-            criterion.num_frames = curr_nf
-            if args.distributed:
-                model.module.num_frames = curr_nf
-            if 'joint' in args.dataset_file:
-                data_loader_train.dataset.datasets[0].num_frames = curr_nf
-                data_loader_train.dataset.datasets[1].num_frames = curr_nf
-            else:
-                data_loader_train.dataset.num_frames = curr_nf
-            print("\n############## Increased Number of Frame to ",curr_nf," ###################\n")
 
         epoch_start_time = time.time()
         train_stats = train_one_epoch(model, criterion, data_loader_train, optimizer, device, epoch, args.clip_max_norm,
-                                      writer, args.debug, args.frame_wise_loss)
+                                      writer, args.debug)
         epoch_total_time = time.time() - epoch_start_time
         epoch_time_str = str(datetime.timedelta(seconds=int(epoch_total_time)))
         print('Total training time {} for epoch{} '.format(epoch_time_str,epoch))

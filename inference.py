@@ -1,10 +1,9 @@
 # ------------------------------------------------------------------------
-# Inference code for InstanceFormer
+# InstanceFormer Inference.
 # ------------------------------------------------------------------------
 
 import argparse
 import random
-import time
 import torch
 import glob
 import util.misc as utils
@@ -15,33 +14,30 @@ from PIL import Image
 import torch.nn.functional as F
 import json
 import pycocotools.mask as mask_util
-from util.visualize import *
 from pathlib import Path
-from util.server_process import upload_file
 import zipfile
 from arg_parse import get_args_parser
-from util.misc import get_memory_from_disk
 from tqdm import tqdm
+import numpy as np
 from detectron2.utils.visualizer import Visualizer
 from detectron2.utils.colormap import random_color
+from util.server_process import upload_file
 
-CLASSES_YVIS_19 = ['person', 'giant_panda', 'lizard', 'parrot', 'skateboard', 'sedan', 'ape',
-                   'dog', 'snake', 'monkey', 'hand', 'rabbit', 'duck', 'cat', 'cow', 'fish',
-                   'train', 'horse', 'turtle', 'bear', 'motorbike', 'giraffe', 'leopard',
-                   'fox', 'deer', 'owl', 'surfboard', 'airplane', 'truck', 'zebra', 'tiger',
-                   'elephant', 'snowboard', 'boat', 'shark', 'mouse', 'frog', 'eagle', 'earless_seal',
-                   'tennis_racket']
+CLASSES = ['person', 'giant_panda', 'lizard', 'parrot', 'skateboard', 'sedan', 'ape',
+           'dog', 'snake', 'monkey', 'hand', 'rabbit', 'duck', 'cat', 'cow', 'fish',
+           'train', 'horse', 'turtle', 'bear', 'motorbike', 'giraffe', 'leopard',
+           'fox', 'deer', 'owl', 'surfboard', 'airplane', 'truck', 'zebra', 'tiger',
+           'elephant', 'snowboard', 'boat', 'shark', 'mouse', 'frog', 'eagle', 'earless_seal',
+           'tennis_racket']
 
-CLASSES_YVIS_21_22 = ['airplane', 'bear', 'bird', 'boat', 'car', 'cat', 'cow', 'deer', 'dog', 'duck', 'earless_seal',
-                      'elephant', 'fish', 'flying_disc', 'fox', 'frog', 'giant_panda', 'giraffe', 'horse', 'leopard',
-                      'lizard', 'monkey', 'motorbike', 'mouse', 'parrot', 'person', 'rabbit', 'shark', 'skateboard',
-                      'snake', 'snowboard', 'squirrel', 'surfboard', 'tennis_racket', 'tiger', 'train', 'truck',
-                      'turtle', 'whale', 'zebra']
+CLASSES_YVIS_22 = ['airplane', 'bear', 'bird', 'boat', 'car', 'cat', 'cow', 'deer', 'dog', 'duck', 'earless_seal',
+                   'elephant', 'fish', 'flying_disc', 'fox', 'frog', 'giant_panda', 'giraffe', 'horse', 'leopard',
+                   'lizard', 'monkey', 'motorbike', 'mouse', 'parrot', 'person', 'rabbit', 'shark', 'skateboard',
+                   'snake', 'snowboard', 'squirrel', 'surfboard', 'tennis_racket', 'tiger', 'train', 'truck',
+                   'turtle', 'whale', 'zebra']
 
-CLASSES_OVIS = ['Person', 'Bird', 'Cat', 'Dog', 'Horse', 'Sheep', 'Cow',
-                'Elephant', 'Bear', 'Zebra', 'Giraffe',
-                'Poultry', 'Giant_panda', 'Lizard', 'Parrot',
-                'Monkey', 'Rabbit', 'Tiger', 'Fish', 'Turtle', 'Bicycle',
+CLASSES_OVIS = ['Person', 'Bird', 'Cat', 'Dog', 'Horse', 'Sheep', 'Cow', 'Elephant', 'Bear', 'Zebra', 'Giraffe',
+                'Poultry', 'Giant_panda', 'Lizard', 'Parrot', 'Monkey', 'Rabbit', 'Tiger', 'Fish', 'Turtle', 'Bicycle',
                 'Motorcycle', 'Airplane', 'Boat', 'Vehical']
 
 transform = T.Compose([
@@ -52,6 +48,8 @@ transform = T.Compose([
 
 
 def main(args):
+    save_vis = False
+    fast_inference = True
     device = torch.device(args.device)
     args.train = False
     print(device)
@@ -61,7 +59,9 @@ def main(args):
     np.random.seed(seed)
     random.seed(seed)
 
-    visualization_path = os.path.join(args.initial_output_dir, "visualization", args.exp_name)
+    save_dir = args.initial_save_dir if args.initial_save_dir else args.initial_output_dir
+
+    visualization_path = os.path.join(save_dir, "visualization", args.exp_name)
     Path(visualization_path).mkdir(parents=True, exist_ok=True)
 
     with torch.no_grad():
@@ -74,7 +74,6 @@ def main(args):
             ckpt_list.sort(reverse=True)
             ckpt_list = ckpt_list[:-1]
 
-        # load videos
         videos = json.load(open(args.ann_path, 'rb'))['videos']
         vis_num = len(videos)
         # now run the model for all the checkpoint
@@ -83,10 +82,10 @@ def main(args):
             print("Processing checkpoint : ", ckpt_name)
             # check result dir if already processed
             if args.inference_comment:
-                results_path = os.path.join(args.initial_output_dir, "results", args.exp_name, args.inference_comment)
+                results_path = os.path.join(save_dir, "results", args.exp_name, args.inference_comment)
                 analysis_path = os.path.join(args.initial_output_dir, "analysis", args.exp_name, args.inference_comment)
             else:
-                results_path = os.path.join(args.initial_output_dir, "results", args.exp_name)
+                results_path = os.path.join(save_dir, "results", args.exp_name)
                 analysis_path = os.path.join(args.initial_output_dir, "analysis", args.exp_name)
 
             if os.path.exists(os.path.join(results_path, args.exp_name + "_" + ckpt_name + ".zip")):
@@ -94,25 +93,25 @@ def main(args):
                 continue
 
             Path(analysis_path).mkdir(parents=True, exist_ok=True)
-            save_vis = args.save_visualization and ckp_id == 0
             state_dict = torch.load(ckpt)['model']
             model.load_state_dict(state_dict, strict=False)
             model.eval()
-            folder = args.img_path
+            folder = args.ytvis_path
 
             result = []
-            fps = []
             for i in tqdm(range(vis_num)):
                 id_ = videos[i]['id']
                 vid_len = videos[i]['length']
                 file_names = videos[i]['file_names']
                 video_name_len = 8 if 'ovis' in args.dataset_file else 10
-                if save_vis:  # save vis only for last checkpoint
+
+                if save_vis: #save vis only for last checkpoint
                     video_path = f"{visualization_path}/{file_names[0][:video_name_len]}"
                     Path(video_path).mkdir(parents=True, exist_ok=True)
 
                 img_set = []
                 visualize_img_set = []
+
                 vid_range = min(25, vid_len) if (args.debug and 'ovis' in args.dataset_file) else vid_len
                 for k in range(vid_range):
                     im = Image.open(os.path.join(folder, file_names[k]))
@@ -121,28 +120,13 @@ def main(args):
                     img_set.append(transform(im).unsqueeze(0).cuda())
 
                 img = torch.cat(img_set, 0)
-                if not args.dynamic_memory and args.memory_support > 0 and args.memory_token > 0:
-                    all_token_mem, all_mask = get_memory_from_disk(args.save_path, file_names, vid_range,
-                                                                   args.memory_support, args.memory_token,
-                                                                   args.hidden_dim)
-                    all_token_mem = all_token_mem.cuda();
-                    all_mask = all_mask.cuda()
-                    memory_pos = model.detr.memory_pos(mask=all_mask)
-                else:
-                    all_token_mem = None;
-                    all_mask = None;
-                    memory_pos = None;
-                # model.detr.num_frames=vid_range
-                model.num_frames = vid_range
-                start = time.time()
-                # run the model
-                outputs = model.inference(img, img.shape[-1], img.shape[-2], all_token_mem, all_mask, memory_pos,
-                                          (args.debug and 'ovis' in args.dataset_file))
 
-                end = time.time()
-                fps.append(vid_range / (end - start))
-                print("Instanceformer mean FPS : {0}, and current FPS {1}".format(np.mean(fps),
-                                                                                  (vid_range / (end - start))))
+                memory_pos = None
+                model.num_frames = vid_range
+
+                outputs = model.inference(img, img.shape[-1], img.shape[-2], memory_pos, fast_inference)
+
+
                 logits = outputs['pred_logits'].squeeze(1)
                 output_mask = outputs['pred_masks'].squeeze(2).permute(1, 0, 2, 3)
 
@@ -154,9 +138,7 @@ def main(args):
                 indices10 = indices10.tolist()
                 num_classes = 27 if 'ovis' in args.dataset_file else 42
 
-                hs_analysis = []
-                ref_analysis = []
-                init_ref_analysis = []
+
                 for idx in indices10:
                     queryid = (idx % (logits.shape[1] * num_classes)) // num_classes
                     if args.weighted_category:
@@ -168,11 +150,6 @@ def main(args):
                     else:
                         hit_dict[queryid] = [idx % num_classes]
 
-                    if args.analysis:
-                        hs_analysis.append(outputs['hs_analysis'])
-                        ref_analysis.append(outputs['ref_analysis'])
-                        init_ref_analysis.append(outputs['init_ref_analysis'])
-
                 if save_vis:
                     visualization_masks = [[] for _ in range(vid_range)]
                     labels = [[] for _ in range(vid_range)]
@@ -181,7 +158,7 @@ def main(args):
                 for inst_id in hit_dict.keys():
                     masks = output_mask[inst_id]
                     pred_masks = F.interpolate(masks[:, None, :, :], (im.size[1], im.size[0]), mode="bilinear")
-                    pred_masks = pred_masks.sigmoid().cpu().detach().numpy() > 0.5  # shape [100, 36, 720, 1280]
+                    pred_masks = pred_masks.sigmoid().cpu().detach().numpy() > 0.5
                     if pred_masks.max() == 0:
                         print('skip')
                         continue
@@ -191,7 +168,6 @@ def main(args):
                             score = score_dict[inst_id]
                         else:
                             score = scores[:, inst_id, class_id][0]
-
                         instance = {'video_id': id_, 'video_name': file_names[0][:video_name_len],
                                     'score': float(score), 'category_id': int(category_id)}
                         segmentation = []
@@ -206,12 +182,9 @@ def main(args):
                                     visualization_masks[n].append(mask)
                                     labels[n].append(int(category_id))
                                     conf_scores[n].append(score)
-                                if args.remove_zero_mask and mask.sum() == 0:
-                                    segmentation.append(None)
-                                else:
-                                    rle = mask_util.encode(np.array(mask[:, :, np.newaxis], order='F'))[0]
-                                    rle["counts"] = rle["counts"].decode("utf-8")
-                                    segmentation.append(rle)
+                                rle = mask_util.encode(np.array(mask[:, :, np.newaxis], order='F'))[0]
+                                rle["counts"] = rle["counts"].decode("utf-8")
+                                segmentation.append(rle)
                         instance['segmentations'] = segmentation
                         result.append(instance)
 
@@ -222,25 +195,22 @@ def main(args):
                         visualizer = Visualizer(visualize_img_set[k], metadata=None, scale=1.0)
                         non_zero_mask = [j for j, vm in enumerate(visualization_masks[k]) if vm.sum() > 2]
                         vis_mask = [visualization_masks[k][i] for i in non_zero_mask]
-                        # TODO: Change CLASSES to CLASSES_YVIS_21_22 for YTVIS21/22
-                        vis_label = [CLASSES_OVIS[labels[k][i] - 1] if 'ovis' in args.dataset_file else CLASSES_YVIS_19[
-                                                                                                            labels[k][
-                                                                                                                i] - 1] + (
-                                                                                                            f':{conf_scores[k][i] * 100:.1f}%')
-                                     for i in non_zero_mask]
+                        vis_label = [
+                            CLASSES_OVIS[labels[k][i] - 1] if 'ovis' in args.dataset_file else CLASSES[labels[k][i] - 1] + (
+                                f':{conf_scores[k][i] * 100:.1f}%') for i in non_zero_mask]
                         vis_color = [assigned_colors[i] for i in non_zero_mask]
                         vis = visualizer.overlay_instances(labels=vis_label, masks=vis_mask, assigned_colors=vis_color)
                         vis.save(f"{visualization_path}/{file_names[k]}")
-                if args.analysis:
-                    np.save(f"{analysis_path}/{videos[i]['file_names'][0].split('/')[0]}_hs_analysis.npy",
-                            torch.stack(hs_analysis).cpu().detach().numpy())
-                    np.save(f"{analysis_path}/{videos[i]['file_names'][0].split('/')[0]}_ref_analysis.npy",
-                            torch.stack(ref_analysis).cpu().detach().numpy())
-                    np.save(f"{analysis_path}/{videos[i]['file_names'][0].split('/')[0]}_init_ref_analysis.npy",
-                            torch.stack(init_ref_analysis).cpu().detach().numpy())
 
-                if args.debug:
-                    break
+                if args.analysis:
+                    analysis_indices = torch.tensor(list(hit_dict.keys()))
+                    hs_analysis = outputs['hs_analysis'][:, analysis_indices, ...]
+                    ref_analysis = outputs['ref_analysis'][:, :,analysis_indices, ...]
+                    init_ref_analysis = outputs['init_ref_analysis'][:, analysis_indices, ...]
+                    np.save(f"{analysis_path}/{videos[i]['file_names'][0].split('/')[0]}_hs_analysis.npy", hs_analysis.cpu().detach().numpy())
+                    np.save(f"{analysis_path}/{videos[i]['file_names'][0].split('/')[0]}_ref_analysis.npy", ref_analysis.cpu().detach().numpy())
+                    np.save(f"{analysis_path}/{videos[i]['file_names'][0].split('/')[0]}_init_ref_analysis.npy", init_ref_analysis.cpu().detach().numpy())
+
             torch.cuda.empty_cache()
             Path(results_path).mkdir(parents=True, exist_ok=True)
             json_path = f"{results_path}/results.json"

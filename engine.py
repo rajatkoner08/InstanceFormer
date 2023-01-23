@@ -1,28 +1,19 @@
 # ------------------------------------------------------------------------
-# Train and eval functions used in main.py
+# InstanceFormer Train and Eval functions used in main.py
 # ------------------------------------------------------------------------
 # Modified from Deformable DETR (https://github.com/fundamentalvision/Deformable-DETR)
 # Copyright (c) 2020 SenseTime. All Rights Reserved.
 # ------------------------------------------------------------------------
 
 import math
-import os
 import sys
 from typing import Iterable
 import cv2
-import numpy as np
-import json
-import copy
-
 import torch
 import util.misc as utils
-from util.misc import NestedTensor
 from datasets.coco_eval import CocoEvaluator
-from datasets.panoptic_eval import PanopticEvaluator
 from datasets.data_prefetcher import data_prefetcher
-from PIL import Image, ImageDraw
 from tqdm import tqdm
-from scipy.optimize import linear_sum_assignment
 from torch.nn.parallel import DistributedDataParallel
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
@@ -50,12 +41,11 @@ def check_unused_parameters(model, loss_dict, weight_dict):
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, max_norm: float = 0,
-                    writer=None, debug=False, frame_wise_loss=False):
+                    writer=None, debug=False):
     model.train()
     criterion.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
-    metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     metric_logger.add_meter('grad_norm', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 4000
@@ -64,7 +54,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     samples, targets = prefetcher.next()
 
     for j in tqdm(metric_logger.log_every(range(len(data_loader)), print_freq, header)):
-        outputs, loss_dict = model(samples, targets, criterion, optimizer, train=True)  # freeze_detr=False
+        outputs, loss_dict = model(samples, targets, criterion)  # freeze_detr=False
 
         weight_dict = criterion.weight_dict
         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
@@ -84,9 +74,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             print(loss_dict_reduced)
             sys.exit(1)
 
-        if not frame_wise_loss:
-            optimizer.zero_grad()
-            losses.backward()
+        optimizer.zero_grad()
+        losses.backward()
 
         if j == 0:
             check_unused_parameters(model, loss_dict, weight_dict)
@@ -100,16 +89,13 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         if writer != None and j % print_freq == 0:
             itr_count = j+epoch*len(data_loader)
             writer.add_scalar("Loss", loss_value, itr_count)
-            writer.add_scalar("class_error", loss_dict_reduced['class_error'], itr_count)
             writer.add_scalar("lr", optimizer.param_groups[0]["lr"], itr_count)
             writer.add_scalar("grad_norm", grad_total_norm, itr_count)
             for k in ['loss_bbox', 'loss_ce', 'loss_dice', 'loss_giou', 'loss_mask']:
                 writer.add_scalar(k, loss_dict_reduced_scaled[k], itr_count)
-                #writer.add_scalar(f'{k}_unscaled', loss_dict_reduced_unscaled[f'{k}_unscaled'], itr_count)
             if 'supcon' in loss_dict_reduced_scaled:
                 writer.add_scalar('supcon', loss_dict_reduced_scaled['supcon'], itr_count)
         metric_logger.update(loss=loss_value)
-        metric_logger.update(class_error=loss_dict_reduced['class_error'])
         metric_logger.update(loss_ce=loss_dict_reduced_scaled['loss_ce'])
         metric_logger.update(loss_bbox=loss_dict_reduced['loss_bbox'])
         metric_logger.update(loss_giou=loss_dict_reduced['loss_giou'])
@@ -118,7 +104,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(grad_norm=grad_total_norm)
         samples, targets = prefetcher.next()
-        if debug and j==5:
+        if debug and j==300:
             break
     torch.cuda.empty_cache()
     # gather the stats from all processes
@@ -136,7 +122,6 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, arg
     criterion.eval()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
-    metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     header = 'Test:'
 
     coco_iou_types = [k for k in ['bbox', 'segm'] if k in postprocessors.keys()]
@@ -163,7 +148,6 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, arg
         metric_logger.update(loss=sum(loss_dict_reduced_scaled.values()),
                              **loss_dict_reduced_scaled,
                              **loss_dict_reduced_unscaled)
-        metric_logger.update(class_error=loss_dict_reduced['class_error'])
         #### reduce losses over all GPUs for logging purposes ####
         ##### single clip input ######
 
@@ -175,9 +159,6 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, arg
         results = [{} for i in range(len(targets))]
         if 'bbox' in postprocessors.keys():
             results = postprocessors['bbox'](all_outputs, orig_target_sizes, num_frames=num_frames)
-            #   scores: [num_ins]
-            #   labels: [num_ins]
-            #   boxes: [num_ins, num_frames, 4]
 
         if 'segm' in postprocessors.keys():
             target_sizes = torch.stack([t["size"] for t in targets], dim=0)
