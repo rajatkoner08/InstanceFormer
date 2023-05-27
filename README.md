@@ -58,7 +58,7 @@ coco
 ```
 # Run 
 ## Pretraining
-First, pre-train the InstanceFormer with the [COCO](https://cocodataset.org/) dataset with frame size 1.
+First, pre-train the InstanceFormer with the [COCO](https://cocodataset.org/) dataset with frame size 1, or use the pretrained model weight (r50_pretrain.pth) available at this [link](https://drive.google.com/drive/folders/1uAvjjIukcugt7JkCK8KiHQnnoJd0Hgsj?usp=sharing).
 
 ```bash
 bash configs/r50_pretrain.sh
